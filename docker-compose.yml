@@ -1,0 +1,102 @@
+name: spark-iceberg-lab
+
+# Three services (plus a one-shot bucket initializer):
+#   minio          S3-compatible object storage (Iceberg data files live here)
+#   iceberg-rest   Iceberg REST catalog (table metadata pointers)
+#   spark-jupyter  Spark 4.1 + JupyterLab + PySpark + PyIceberg
+#
+# Every value below can be overridden in a local .env file (see .env.example).
+# Defaults work as-is for local development.
+
+services:
+  minio:
+    image: ${MINIO_IMAGE:-minio/minio:latest}
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-password}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"       # S3 API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"   # web console
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+  # One-shot: waits for MinIO, then creates the warehouse bucket and exits.
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-password}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do
+        echo 'waiting for minio...'; sleep 1;
+      done;
+      mc mb --ignore-existing local/warehouse;
+      echo 'warehouse bucket ready';
+      "
+    restart: "no"
+
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture
+    container_name: iceberg-rest
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-password}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      # NOTE: the fixture keeps catalog metadata in memory by default. After
+      # `docker compose down`, table data stays in MinIO but the catalog forgets
+      # the tables; re-run notebooks 01-03 (they are idempotent). To persist the
+      # catalog, see "Persisting the catalog" in README.md.
+    ports:
+      - "${ICEBERG_REST_PORT:-8181}:8181"
+    restart: unless-stopped
+
+  spark-jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NB_USER: ${NB_USER:-spark}
+        SPARK_VERSION: ${SPARK_VERSION:-4.1.2}
+        ICEBERG_VERSION: ${ICEBERG_VERSION:-1.12.0}
+    image: spark-jupyter:4.1
+    container_name: spark-jupyter
+    depends_on:
+      - iceberg-rest
+    ports:
+      - "${JUPYTER_HOST_PORT:-8888}:8888"   # JupyterLab
+      - "4040:4040"                         # Spark UI (first session)
+      - "4041:4041"                         # Spark UI (second session)
+    volumes:
+      # Notebooks: any host folder works. Default is ./notebooks in this repo.
+      - ${WORK_DIR:-./notebooks}:/home/${NB_USER:-spark}/work
+      # Input CSVs (read-only). Default is ./data in this repo.
+      - ${DATA_DIR:-./data}:/home/${NB_USER:-spark}/data:ro
+    environment:
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-}
+      JUPYTER_HOST_PORT: ${JUPYTER_HOST_PORT:-8888}
+      SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-2g}
+      # S3 credentials used by Iceberg's S3FileIO and by PyIceberg
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-admin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-password}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      # Service endpoints for PyIceberg / notebooks (Spark reads spark-defaults.conf)
+      ICEBERG_REST_URI: http://iceberg-rest:8181
+      S3_ENDPOINT: http://minio:9000
+    restart: unless-stopped
+
+volumes:
+  minio-data:

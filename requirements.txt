@@ -1,0 +1,25 @@
+# Python dependencies for the spark-jupyter image.
+# pyspark is installed separately in the Dockerfile so it always matches SPARK_VERSION.
+
+jupyterlab
+ipykernel
+ipywidgets
+findspark
+
+pandas
+numpy
+pyarrow
+
+matplotlib
+seaborn
+plotly
+scikit-learn
+tqdm
+
+# PyIceberg versions independently of the Iceberg Java library (0.x, not 1.x).
+# Do NOT install the [s3fs] extra: it causes dependency conflicts.
+pyiceberg==0.11.1
+
+# These two must be pinned to the same version together.
+fsspec==2024.12.0
+s3fs==2024.12.0
